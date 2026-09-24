@@ -142,6 +142,39 @@ rollback_created_parts "$IMG"
 check "prior owned partition still rolls back" "0" "$?"
 check "originals survive prior rollback" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
 
+echo "==> mkpart writes the table but returns failure"
+build_holey_disk
+(
+  parted() {
+    command parted "$@" || return $?
+    [[ ${3:-} == mkpart ]] && return 1
+    return 0
+  }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  $created_partition_write_uncertain || exit 11
+  rollback_created_parts "$IMG" && exit 12
+  exit 0
+)
+check "failed mkpart cannot claim successful rollback after writing" "0" "$?"
+check "untracked partition is left for inspection" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> failed mkpart cannot read back the table"
+build_holey_disk
+(
+  attempted=false
+  parted() { attempted=true; return 1; }
+  sfdisk() {
+    $attempted && return 1
+    command sfdisk "$@"
+  }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  $created_partition_write_uncertain || exit 11
+  rollback_created_parts "$IMG" && exit 12
+  exit 0
+)
+check "unreadable table cannot claim successful rollback" "0" "$?"
+check "failed attempt leaves originals intact" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
 echo "==> protected disk preserves every snapshotted partition"
 build_holey_disk
 protect_existing_partitions "$IMG"

@@ -232,12 +232,12 @@ disk_step() {
   _disk_abort "$desc failed (exit $status)"
 }
 
-# Create one partition and report the number parted actually assigned. After a
-# successful mkpart, flag the write until its number and identity are known so
+# Create one partition and report the number parted actually assigned. Before
+# attempting mkpart, flag the write until its number and identity are known so
 # rollback reports incomplete cleanup instead of guessing what to remove.
 create_partition() {
   local disk="$1" start="$2" end="$3" fstype="$4" name="$5"
-  local before after num actual want tolerance identity
+  local before after before_layout after_layout num actual want tolerance identity
   local -a new_parts=()
 
   created_partition_number=""
@@ -261,8 +261,16 @@ create_partition() {
   # way it compares them, and `sort -n` (1, 2, 10) is not that order.
   before=$(partition_numbers "$disk" | sort)
 
-  parted --script "$disk" mkpart primary "$fstype" "${start}B" "${end}B" || return 1
+  before_layout=$(sfdisk --dump "$disk") || return 1
   created_partition_write_uncertain=true
+  if ! parted --script "$disk" mkpart primary "$fstype" "${start}B" "${end}B"; then
+    # parted can write the table and then fail to notify the kernel. Only an
+    # unchanged table proves that this failed attempt needs no cleanup.
+    if after_layout=$(sfdisk --dump "$disk") && [[ $after_layout == "$before_layout" ]]; then
+      created_partition_write_uncertain=false
+    fi
+    return 1
+  fi
   partprobe "$disk" 2>/dev/null || true
   udevadm settle 2>/dev/null || true
 
