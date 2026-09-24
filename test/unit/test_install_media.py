@@ -172,6 +172,62 @@ open_install_media_partition_tool
         self.assertNotIn("Partition 4", result.stderr)
         self.assertNotIn("UNEXPECTED", result.stdout)
 
+    def test_deletion_prompt_explains_windows_partitions_and_defaults_to_back(self):
+        result = self.run_shell(functions("open_install_media_partition_tool") + r'''
+disk=/dev/sda
+verify_install_media() { return 0; }
+step() { :; }
+say() { :; }
+abort() { exit 9; }
+parted() {
+  printf '%s\n' 'BYT;' '/dev/sda:100000000B:scsi:512:512:gpt:disk:;'
+  printf '%s\n' '3:1048576B:17825791B:16777216B::Microsoft reserved partition:msftres;'
+  printf '%s\n' '4:17825792B:1117825791B:1100000000B:ntfs:Basic data partition:hidden, diag;'
+}
+is_existing_partition() { return 1; }
+partition_path() { echo "$1$2"; }
+partition_is_idle() { return 0; }
+created_partition_identity() { echo "identity-$2"; }
+lsblk() {
+  case "$2 $3" in
+    'SIZE /dev/sda3') echo 16M ;;
+    'SIZE /dev/sda4') echo 1G ;;
+    'PARTTYPE /dev/sda3') echo e3c9e316-0b5c-4db8-817d-f92df00215ae ;;
+    'PARTTYPE /dev/sda4') echo de94bba4-06d1-4d40-a16a-bfd50179d6ac ;;
+  esac
+}
+gum() {
+  printf '%s\n' "$@" >&2
+  [[ $1 == choose ]] && { printf '%s\n' "${@: -1}"; return 0; }
+  return 1
+}
+delete_unprotected_partition() { echo UNEXPECTED; }
+open_install_media_partition_tool
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Partition 3 · 16M · Microsoft reserved partition · Windows reserved, needed while Windows is installed\n", result.stderr)
+        self.assertIn("Partition 4 · 1G · Basic data partition · Windows recovery tools\n", result.stderr)
+        self.assertIn("--default=false", result.stderr)
+        self.assertNotIn("UNEXPECTED", result.stdout)
+
+    def test_free_space_is_checked_again_after_a_deletion(self):
+        result = self.run_shell(functions("is_install_media_disk", "select_installation") + r'''
+disk=/dev/sda
+install_media_disk=/dev/sda
+modes=0
+decisions=0
+install_mode_form() { modes=$((modes + 1)); install_mode="Free space install"; }
+run_partition_decide() {
+  decisions=$((decisions + 1))
+  (( decisions == 1 )) && { partition_deleted=true; return 1; }
+  return 0
+}
+select_installation
+echo "$install_target $modes $decisions"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "free_space 1 2")
+
     def test_missing_source_row_is_rejected_during_capture(self):
         result = self.run_shell(r'''
 source "$LIB"

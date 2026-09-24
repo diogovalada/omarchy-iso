@@ -189,9 +189,10 @@ step() {
   echo
 }
 
-# Padded body text to line up with the logo and gum widgets.
+# Padded body text to line up with the logo and gum widgets. The width mirrors
+# the left padding so long lines wrap within the logo's column.
 say() {
-  gum style --padding "0 0 0 $PADDING_LEFT" "$@"
+  gum style --padding "0 0 0 $PADDING_LEFT" --width "$((TERM_WIDTH - PADDING_LEFT))" "$@"
 }
 
 notice() {
@@ -1062,7 +1063,8 @@ disk_form() {
         can_install_beside_media || continue
       fi
       disk_info=$(get_disk_info "$device")
-      [[ $device == "$install_media_disk" ]] && disk_info+=" — installer disk, free space only"
+      # Right after the device name, where long rows cannot push it off screen.
+      [[ $device == "$install_media_disk" ]] && disk_info="$device (installer disk, free space only)${disk_info#"$device"}"
       disk_options="$disk_options$disk_info"$'\n'
     fi
   done <<<"$available_disks"
@@ -1088,7 +1090,7 @@ open_install_media_partition_tool() {
   verify_install_media || abort "The installer source changed; stopping."
   step "Free space on $disk"
   say "The installer partitions cannot be removed. You can delete another partition to make room for Omarchy."
-  say "Deleting a partition permanently removes its data. Keep any partitions you still need."
+  say "Omarchy needs 32 GiB of free space in one place. Deleting a partition permanently removes its data. Keep any partitions you still need."
 
   table=$(parted -ms "$disk" unit B print) || abort "Cannot read the partition table."
   while IFS= read -r entry; do
@@ -1104,6 +1106,12 @@ open_install_media_partition_tool() {
     details=$(lsblk -dno FSTYPE,LABEL "$device" 2>/dev/null | head -1 | tr -s ' ')
     details=${details# }
     details=${details% }
+    # Small Windows system partitions are listed with their purpose, since
+    # deleting one rarely frees enough space on its own.
+    case $(lsblk -dno PARTTYPE "$device" 2>/dev/null) in
+      e3c9e316-0b5c-4db8-817d-f92df00215ae) details+="${details:+ · }Windows reserved, needed while Windows is installed" ;;
+      de94bba4-06d1-4d40-a16a-bfd50179d6ac) details+="${details:+ · }Windows recovery tools" ;;
+    esac
     options+=("Partition $num · ${size:-unknown size}${name:+ · $name}${details:+ · $details}")
   done <<<"$table"
 
@@ -1119,13 +1127,16 @@ open_install_media_partition_tool() {
   num=${num%% *}
   [[ $num =~ ^[0-9]+$ ]] || return 1
   expected=$(grep -E "^${num}:" <<<"$table") || return 1
-  gum confirm --affirmative "Delete partition $num" --negative "Back" \
-    "Permanently delete $choice on $disk? All its data will be lost." || return 0
+  # The full description wraps; the prompt stays short enough to fit one line.
+  say "$choice on $disk"
+  gum confirm --default=false --affirmative "Delete partition $num" --negative "Back" \
+    "Permanently delete partition $num? All its data will be lost." || return 0
   verify_install_media || abort "The installer source changed; stopping."
   delete_unprotected_partition "$disk" "$num" "$expected" "${expected_identities[$num]:-}" ||
     abort "Partition $num changed or could not be safely deleted."
-  say "Partition $num was deleted. Choose Free space install again to use the space."
-  gum input --placeholder "Press Enter to continue" >/dev/null || true
+  partition_deleted=true
+  say "Partition $num was deleted."
+  gum input --placeholder "Press Enter to check the free space again" >/dev/null || true
 }
 
 open_partition_tool() {
@@ -1263,10 +1274,16 @@ select_installation() {
         $full_disk_only && disk_form
         ;;
       "Free space install"*)
-        if run_partition_decide; then
-          install_target="free_space"
-          return 0
-        fi
+        # After a partition is deleted to make room, check the space again
+        # instead of returning to this menu.
+        while true; do
+          partition_deleted=false
+          if run_partition_decide; then
+            install_target="free_space"
+            return 0
+          fi
+          $partition_deleted || break
+        done
         ;;
       "Choose a different disk")
         disk_form
